@@ -11,6 +11,7 @@ try:
     from jwkest.jwk import RSAKey, KEYS
     from jwkest.jws import JWS
     from jwkest.jwt import b64encode_item
+    from jwcrypto import jwk, jws
     NO_JWKEST = False
 except ImportError:
     NO_JWKEST = True
@@ -36,7 +37,10 @@ class OpenIdConnectTestMixin(object):
     def setUp(self):
         super(OpenIdConnectTestMixin, self).setUp()
         test_root = os.path.dirname(os.path.dirname(__file__))
-        self.key = RSAKey(kid='testkey').load(os.path.join(test_root, 'testkey.pem'))
+        self.other_key = RSAKey(kid='testkey').load(os.path.join(test_root, 'testkey.pem'))
+        with open(os.path.join(test_root, 'testkey.pem'), mode='rb') as fd:
+            self.key = jwk.JWK.from_pem(fd.read())
+            self.key._params['kid'] = 'testkey'
         HTTPretty.register_uri(HTTPretty.GET,
           self.backend.OIDC_ENDPOINT + '/.well-known/openid-configuration',
           status=200,
@@ -45,9 +49,9 @@ class OpenIdConnectTestMixin(object):
         oidc_config = json.loads(self.openid_config_body)
 
         def jwks(_request, _uri, headers):
-            ks = KEYS()
-            ks.add(self.key.serialize())
-            return 200, headers, ks.dump_jwks()
+            ks = jwk.JWKSet()
+            ks.add(self.key)
+            return 200, headers, ks.export(private_keys=False)
 
         HTTPretty.register_uri(HTTPretty.GET,
                                oidc_config.get('jwks_uri'),
@@ -69,7 +73,7 @@ class OpenIdConnectTestMixin(object):
         Get the nonce from the request parameters, add it to the id_token, and
         return the complete response.
         """
-        nonce = self.backend.data['nonce'].encode('utf-8')
+        nonce = self.backend.data['nonce']
         body = self.prepare_access_token_body(nonce=nonce)
         return 200, headers, body
 
@@ -113,7 +117,9 @@ class OpenIdConnectTestMixin(object):
             client_key, timegm(expiration_datetime.utctimetuple()),
             timegm(issue_datetime.utctimetuple()), nonce, issuer)
 
-        body['id_token'] = JWS(id_token, jwk=self.key, alg='RS256').sign_compact()
+        signed_token = jws.JWS(json.dumps(id_token))
+        signed_token.add_signature(self.key, alg='RS256')
+        body['id_token'] = signed_token.serialize(compact=True)
         if tamper_message:
             header, msg, sig = body['id_token'].split('.')
             id_token['sub'] = '1235'

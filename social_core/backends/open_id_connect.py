@@ -1,11 +1,10 @@
 import datetime
 from calendar import timegm
 
+import requests
 import six
 
-from jwkest import JWKESTException
-from jwkest.jwk import KEYS
-from jwkest.jws import JWS
+from jwcrypto import jwk, jws as jws_module
 
 from .oauth import BaseOAuth2
 from ..utils import cache
@@ -79,12 +78,17 @@ class OpenIdConnectAuth(BaseOAuth2):
 
     @cache(ttl=86400)
     def get_jwks_keys(self):
-        keys = KEYS()
-        keys.load_from_url(self.jwks_uri())
+        """Return a set of JSON Web Keys."""
+        keys_request = requests.get(self.jwks_uri())
+        if keys_request.status_code == 200:
+            keys = jwk.JWKSet.from_json(keys_request.text)
+        else:
+            # TODO Raise something
+            pass
 
         # Add client secret as oct key so it can be used for HMAC signatures
         client_id, client_secret = self.get_key_and_secret()
-        keys.add({'key': client_secret, 'kty': 'oct'})
+        keys.add(jwk.JWK(k=client_secret, kty='oct'))
         return keys
 
     def auth_params(self, state=None):
@@ -163,14 +167,24 @@ class OpenIdConnectAuth(BaseOAuth2):
         """
         try:
             # Decode the JWT and raise an error if the sig is invalid
-            id_token = JWS().verify_compact(jws.encode('utf-8'),
-                                            self.get_jwks_keys())
-        except JWKESTException:
+            id_token = jws_module.JWS()
+            id_token.deserialize(jws)
+        except jws_module.InvalidJWSObject:
+            raise AuthTokenError(self, 'Malformed JWS object')
+
+        for key in self.get_jwks_keys()['keys']:
+            try:
+                id_token.verify(key, alg='RS256')
+                break
+            except jws_module.InvalidJWSSignature:
+                pass
+        else:
             raise AuthTokenError(self, 'Signature verification failed')
 
-        self.validate_claims(id_token)
+        import json
+        self.validate_claims(json.loads(id_token.payload))
 
-        return id_token
+        return id_token.payload
 
     def request_access_token(self, *args, **kwargs):
         """

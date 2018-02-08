@@ -1,1 +1,2 @@
-pyjwkest>=1.0.1
+jwcrypto
+pyjwkest
